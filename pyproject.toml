@@ -1,0 +1,111 @@
+# Hatchling because it needs no setup.py and no runtime shim, and because the
+# version is read straight out of the package: a wheel whose metadata disagrees
+# with the User-Agent on the wire is a support ticket nobody can reproduce.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "naijacloud-email"
+dynamic = ["version"]
+description = "Official Python SDK for Naijamail, Naija Cloud's transactional email API."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Naija Cloud", email = "support@naijacloud.com" }]
+maintainers = [{ name = "Naija Cloud", email = "support@naijacloud.com" }]
+keywords = ["naijamail", "naija cloud", "email", "transactional email", "smtp", "api"]
+
+# No runtime dependencies, deliberately. This package holds a live sending
+# credential; every third-party import is another maintainer with the ability to
+# run code in a process that can mail as a customer's verified domain.
+dependencies = []
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Communications :: Email",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://www.naijacloud.com"
+Documentation = "https://docs.naijacloud.com/email"
+Source = "https://github.com/naija-cloud/nc-email-python"
+Changelog = "https://github.com/naija-cloud/nc-email-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/naija-cloud/nc-email-python/issues"
+
+[project.optional-dependencies]
+# Test and lint tooling only. The suite itself runs on the standard library, so
+# `python -m unittest discover -s tests` works with none of this installed.
+dev = ["pytest>=7", "mypy>=1.5", "ruff>=0.4"]
+
+[tool.hatch.version]
+path = "src/nc_email/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nc_email"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/examples",
+  "/README.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/SECURITY.md",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S"]
+ignore = [
+  # `assert` in tests is the point of tests.
+  "S101",
+  # The SDK supports 3.9, so `dict[str, str]`, `X | Y` and `X | None`
+  # annotations, `typing` deprecations and f-string rewrites that pyupgrade
+  # suggests for newer interpreters do not apply here.
+  "UP006",
+  "UP007",
+  "UP035",
+  "UP045",
+  "UP032",
+]
+
+[tool.ruff.lint.isort]
+# Keep the re-export aliases in the same statement as their siblings instead of
+# scattering one import line per alias.
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# The test suite deliberately builds signatures, binds sockets and asserts.
+"tests/*" = ["S", "E501"]
+"examples/*" = ["S", "T201"]
+
+[tool.mypy]
+# No python_version pin: recent mypy refuses to target 3.9 at all, and 3.9
+# compatibility is what the CI test matrix is for. Type checking runs against
+# whichever interpreter CI installs.
+strict = true
+files = ["src/nc_email"]
+warn_unused_ignores = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
