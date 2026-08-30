@@ -25,11 +25,26 @@ DEFAULT_BASE_URL = "https://api.naijacloud.com"
 API_KEY_ENV_VAR = "NAIJAMAIL_API_KEY"
 BASE_URL_ENV_VAR = "NAIJAMAIL_BASE_URL"
 
-#: `nmail_live_…` / `nmail_test_…`, matching MAIL_KEY_PREFIX_LIVE in the control
-#: plane. Checked at construction so an empty string or a pasted-with-whitespace
-#: key fails here, at import time in a deploy, rather than as a 401 the first
-#: time a customer triggers a receipt.
-API_KEY_PATTERN = re.compile(r"^nmail_(live|test)_[A-Za-z0-9_-]{8,}$")
+#: Two families are accepted, because the API accepts two:
+#:
+#:   ``nmail_live_`` / ``nmail_test_`` — a Naijamail-only key from the dashboard's
+#:       Email screen. The test variant is refused by the send path, which is the
+#:       point of it.
+#:   ``nc_live_`` — a workspace API key carrying the Email send scope, from
+#:       Settings -> API keys. One credential for mail, deploys and the platform
+#:       API, so a customer who already has one does not need a second.
+#:
+#: Checked at construction so an empty string or a pasted-with-whitespace key
+#: fails here, at import time in a deploy, rather than as a 401 the first time a
+#: customer triggers a receipt. Kept as an allowlist rather than relaxed to "any
+#: non-empty string": the check exists to catch the truncated paste and the
+#: wrong-variable-name deploy, and a pattern that accepts anything catches
+#: neither.
+API_KEY_PATTERN = re.compile(r"^(?:nmail_(?:live|test)|nc_live)_[A-Za-z0-9_-]{8,}$")
+
+#: The prefixes above, for redaction. Order matters only for readability; they
+#: cannot both match the same string.
+API_KEY_PREFIXES = ("nmail_live_", "nmail_test_", "nc_live_")
 
 #: The only hosts allowed to be reached over plaintext. A dev control plane on a
 #: loopback address never leaves the machine; anything else would put a live
@@ -46,7 +61,7 @@ def redact_key(api_key: str) -> str:
     length, every character given away is search space an attacker does not have
     to cover.
     """
-    for prefix in ("nmail_live_", "nmail_test_"):
+    for prefix in API_KEY_PREFIXES:
         if api_key.startswith(prefix):
             return prefix + "***"
     return "***"
@@ -119,8 +134,8 @@ class Naijamail:
             # The key itself is never echoed, here least of all: a construction
             # error is exactly the kind of thing that ends up in a CI log.
             raise ValidationError(
-                "api_key does not look like a Naijamail key (expected nmail_live_… "
-                "or nmail_test_…)"
+                "api_key does not look like a Naijamail key (expected nmail_live_…, "
+                "nmail_test_… or nc_live_…)"
             )
 
         resolved_base = base_url or os.environ.get(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL

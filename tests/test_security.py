@@ -103,6 +103,10 @@ class KeyRedactionTest(unittest.TestCase):
     def test_redact_key_keeps_only_the_prefix(self) -> None:
         self.assertEqual(nc_email.redact_key(TEST_KEY), "nmail_live_***")
         self.assertEqual(nc_email.redact_key("nmail_test_abcdefgh"), "nmail_test_***")
+        # Without the second family here a workspace key falls through to the
+        # bare `***`, and an operator reading a dump loses the one useful
+        # signal: which kind of credential this process is holding.
+        self.assertEqual(nc_email.redact_key("nc_live_abcdefgh"), "nc_live_***")
         self.assertEqual(nc_email.redact_key("garbage"), "***")
 
 

@@ -36,7 +36,21 @@ class ConstructionTest(unittest.TestCase):
                 os.environ["NAIJAMAIL_API_KEY"] = previous
 
     def test_rejects_a_key_of_the_wrong_shape(self) -> None:
-        for bad in ["", "sk_live_whatever", "nmail_live_", "nmail_live_short", "nmail_prod_abcdefgh"]:
+        bad_keys = [
+            "",
+            "sk_live_whatever",
+            "nmail_live_",
+            "nmail_live_short",
+            "nmail_prod_abcdefgh",
+            # The pre-scopes platform token. The API refuses it on the mail
+            # routes outright — it predates the Email send scope and was never
+            # granted mail access — so this fails here rather than at send time.
+            "nc_pat_0123456789abcdef",
+            # There is no test variant of a workspace key; the live/test split
+            # belongs to the nmail_ family.
+            "nc_test_0123456789abcdef",
+        ]
+        for bad in bad_keys:
             with self.subTest(key=bad):
                 with self.assertRaises(ValidationError):
                     Naijamail(bad)
@@ -44,6 +58,11 @@ class ConstructionTest(unittest.TestCase):
     def test_accepts_live_and_test_keys(self) -> None:
         self.assertTrue(Naijamail("nmail_live_abcdefgh").masked_api_key.startswith("nmail_live_"))
         self.assertTrue(Naijamail("nmail_test_abcdefgh").masked_api_key.startswith("nmail_test_"))
+
+    def test_accepts_a_workspace_api_key(self) -> None:
+        """A key from Settings -> API keys, carrying the Email send scope."""
+        client = Naijamail("nc_live_0123456789abcdefghij")
+        self.assertEqual(client.masked_api_key, "nc_live_***")
 
     def test_default_base_url(self) -> None:
         self.assertEqual(Naijamail(TEST_KEY).base_url, "https://api.naijacloud.com")
