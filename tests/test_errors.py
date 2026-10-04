@@ -161,3 +161,17 @@ class TimeoutTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PayloadTooLargeTest(unittest.TestCase):
+    def test_a_413_is_a_validation_error(self) -> None:
+        # The server's body parser answers 413 to an oversized request. That is
+        # the caller's input, never worth a retry, and should be caught by the
+        # same except clause as every other refused payload.
+        api = MockAPI().start()
+        self.addCleanup(api.stop)
+        client = Naijamail(TEST_KEY, base_url=api.base_url, max_retries=0)
+        api.enqueue_error(413, "request entity too large")
+        with self.assertRaises(ValidationError) as caught:
+            client.emails.send(**MINIMAL)
+        self.assertEqual(caught.exception.status_code, 413)

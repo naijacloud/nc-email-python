@@ -180,7 +180,9 @@ def _error_for_response(
         return NaijamailTimeoutError(message, **common)
     if status == 409:
         return ConflictError(message, **common)
-    if status == 422:
+    if status in (413, 422):
+        # 413: the body was over the server's size limit — the caller's input,
+        # and no retry will shrink it.
         return ValidationError(message, **common)
     if status == 429:
         return RateLimitError(

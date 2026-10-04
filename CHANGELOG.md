@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Redaction knows the new prefix, so a dump still shows which kind of credential
   a process is holding. `nc_pat_…` platform tokens remain refused: they predate
   the scope and the API rejects them on the mail routes.
+- `Email.sandbox` on a retrieved email: true for a message sent with a test key,
+  which is recorded but never delivered, so a simulated bounce can be told from
+  a real one.
+
+### Fixed
+
+- **Security:** the API key is trimmed and checked with a full match. A key
+  with a trailing newline used to pass the check and then appear, whole, in a
+  raw `ValueError` from `http.client`.
+- `send()` refuses an argument it does not know (`htlm=`) instead of dropping it.
+- `Webhooks.verify` refuses a NaN, infinite or negative `tolerance`, which
+  switched replay protection off.
+- A 413 (request too large) is a `ValidationError`.
+- Tag length is counted in UTF-16 units, the way the server counts it.
+- Test keys (`nmail_test_…`) are sandboxed by the API, not refused with a 403.
+  The README said otherwise.
 
 ## [0.1.0] - 2026-08-29
 
@@ -63,5 +79,5 @@ First release. Implements SDK-CONTRACT.md in full.
 - Attachments take bytes; file paths are never opened on the caller's behalf.
 - Constant-time webhook signature comparison, with a replay window.
 
-[Unreleased]: https://github.com/naija-cloud/nc-email-python/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/naija-cloud/nc-email-python/releases/tag/v0.1.0
+[Unreleased]: https://github.com/naijacloud/nc-email-python/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/naijacloud/nc-email-python/releases/tag/v0.1.0

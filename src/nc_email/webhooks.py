@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import time
 from typing import Any, List, Mapping, Optional, Tuple, Union
 
@@ -94,6 +95,17 @@ class Webhooks:
         value they failed to guess turns a rejected forgery into a working one.
         """
         body = _as_bytes(payload)
+
+        # NaN compares false against everything, so `drift > NaN` would never
+        # fire and every replayed event would pass. A tolerance read with
+        # float(os.environ.get(...)) is exactly how one arrives.
+        if (
+            isinstance(tolerance, bool)
+            or not isinstance(tolerance, (int, float))
+            or not math.isfinite(tolerance)
+            or tolerance < 0
+        ):
+            raise ValidationError("tolerance must be a finite number of seconds, 0 or more")
 
         if not signature_header or not isinstance(signature_header, str):
             raise WebhookVerificationError("missing NC-Signature header")

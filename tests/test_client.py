@@ -127,3 +127,31 @@ class ConstructionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyWhitespaceTest(unittest.TestCase):
+    def test_a_trailing_newline_is_trimmed_not_sent(self) -> None:
+        # `$` in a regex also matches before a final "\n", so a key read from a
+        # file or a CI secret with a newline used to pass validation, reach
+        # http.client, and surface as a raw ValueError quoting the whole key.
+        from _support import MockAPI
+
+        api = MockAPI().start()
+        self.addCleanup(api.stop)
+        api.enqueue_json(200, {"id": "1", "to": "x@y.com", "from": "a@acme.com",
+                               "subject": "", "status": "queued",
+                               "created_at": "2026-08-29T10:00:00.000Z",
+                               "opened": False, "clicked": False})
+        client = Naijamail(TEST_KEY + "\n", base_url=api.base_url, max_retries=0)
+        client.emails.get("1")
+        self.assertEqual(api.requests[-1].headers["authorization"], "Bearer " + TEST_KEY)
+
+    def test_a_key_with_an_inner_newline_is_refused_without_quoting_it(self) -> None:
+        with self.assertRaises(ValidationError) as caught:
+            Naijamail(TEST_KEY + "\nX-Evil: 1")
+        self.assertNotIn(TEST_KEY, str(caught.exception))
+
+    def test_a_whitespace_only_key_names_the_environment_variable(self) -> None:
+        with self.assertRaises(ValidationError) as caught:
+            Naijamail("  \n")
+        self.assertIn("NAIJAMAIL_API_KEY", str(caught.exception))

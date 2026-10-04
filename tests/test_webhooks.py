@@ -146,3 +146,17 @@ class VerifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToleranceTest(unittest.TestCase):
+    def test_a_nan_tolerance_is_refused_rather_than_disabling_replay_protection(self) -> None:
+        # `drift > nan` is always False, so a NaN tolerance (from
+        # float(os.environ.get(...)) on a typo) accepted any replayed event.
+        stale = sign(BODY, timestamp=int(time.time()) - 86400)
+        for bad in (float("nan"), float("inf"), -1):
+            with self.assertRaises(ValidationError):
+                Webhooks.verify(BODY, stale, SECRET, tolerance=bad)
+
+    def test_a_zero_tolerance_is_still_allowed(self) -> None:
+        with self.assertRaises(WebhookVerificationError):
+            Webhooks.verify(BODY, sign(BODY, timestamp=int(time.time()) - 5), SECRET, tolerance=0)

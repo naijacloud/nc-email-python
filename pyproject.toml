@@ -42,10 +42,10 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://www.naijacloud.com"
-Documentation = "https://docs.naijacloud.com/email"
-Source = "https://github.com/naija-cloud/nc-email-python"
-Changelog = "https://github.com/naija-cloud/nc-email-python/blob/main/CHANGELOG.md"
-Issues = "https://github.com/naija-cloud/nc-email-python/issues"
+Documentation = "https://naijacloud.com/docs/api/email"
+Source = "https://github.com/naijacloud/nc-email-python"
+Changelog = "https://github.com/naijacloud/nc-email-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/naijacloud/nc-email-python/issues"
 
 [project.optional-dependencies]
 # Test and lint tooling only. The suite itself runs on the standard library, so

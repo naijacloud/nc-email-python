@@ -124,3 +124,26 @@ class GetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SandboxFlagTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.api = MockAPI().start()
+        self.addCleanup(self.api.stop)
+        self.client = Naijamail(TEST_KEY, base_url=self.api.base_url, max_retries=0)
+
+    def _email(self, **extra) -> Email:  # type: ignore[no-untyped-def]
+        body = {"id": "1", "to": "x@y.com", "from": "a@acme.com", "subject": "Hi",
+                "status": "bounced", "created_at": "2026-08-29T10:00:00.000Z",
+                "opened": False, "clicked": False}
+        body.update(extra)
+        self.api.enqueue_json(200, body)
+        return self.client.emails.get("1")
+
+    def test_exposes_the_sandbox_flag(self) -> None:
+        # A test-key message is never sent; a "bounced" one is simulated. Without
+        # the flag a caller cannot tell it from a real bounce.
+        self.assertTrue(self._email(sandbox=True).sandbox)
+
+    def test_sandbox_defaults_to_false(self) -> None:
+        self.assertFalse(self._email().sandbox)

@@ -130,7 +130,18 @@ class Naijamail:
             )
         if not isinstance(key, str):
             raise ValidationError("api_key must be a string")
-        if not API_KEY_PATTERN.match(key):
+        # Trailing newlines arrive routinely from `cat secret | ...` and from CI
+        # secret stores. `fullmatch`, not `match`: `$` also matches just before a
+        # final newline, so a key ending in "\n" used to pass this check, reach
+        # http.client, and come back as a raw ValueError quoting the whole key.
+        key = key.strip()
+        if not key:
+            raise ValidationError(
+                "no API key: pass api_key= or set the {} environment variable".format(
+                    API_KEY_ENV_VAR
+                )
+            )
+        if not API_KEY_PATTERN.fullmatch(key):
             # The key itself is never echoed, here least of all: a construction
             # error is exactly the kind of thing that ends up in a CI log.
             raise ValidationError(
