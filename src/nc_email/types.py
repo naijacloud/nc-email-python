@@ -195,6 +195,10 @@ class Email:
     clicked: bool = False
     #: Present only when the message failed.
     failure_reason: Optional[str] = None
+    #: True for a message sent with a test key (`nmail_test_…`): recorded, never
+    #: handed to a mail server. A `bounced` sandbox message is a simulated
+    #: outcome, not a deliverability problem.
+    sandbox: bool = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Email:
@@ -209,6 +213,7 @@ class Email:
             opened=_bool(data, "opened"),
             clicked=_bool(data, "clicked"),
             failure_reason=_opt_str(data, "failure_reason"),
+            sandbox=_bool(data, "sandbox"),
         )
 
 

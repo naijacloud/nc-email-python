@@ -13,6 +13,7 @@ debugs for an hour longer than one who gets a local exception naming the field.
 from __future__ import annotations
 
 import base64
+import difflib
 import re
 import urllib.parse
 import uuid
@@ -229,16 +230,46 @@ def _build_tags(value: Any) -> Dict[str, str]:
         text = _require_str(tag_value, 'tag "{}"'.format(key))
         # The server truncates over-long tags. Rejecting instead means a caller
         # never wonders why their analytics group by a key that lost its tail.
-        if len(key) > MAX_TAG_KEY_LENGTH:
+        # Counted in UTF-16 units because the server truncates by JavaScript's
+        # `.length`: an emoji is 2 there, and counting it as 1 here would let
+        # through a tag the server then silently shortens.
+        if _utf16_len(key) > MAX_TAG_KEY_LENGTH:
             raise ValidationError(
                 'tag name "{}" is longer than {} characters'.format(key, MAX_TAG_KEY_LENGTH)
             )
-        if len(text) > MAX_TAG_VALUE_LENGTH:
+        if _utf16_len(text) > MAX_TAG_VALUE_LENGTH:
             raise ValidationError(
                 'tag "{}" value is longer than {} characters'.format(key, MAX_TAG_VALUE_LENGTH)
             )
         tags[key] = text
     return tags
+
+
+#: Every spelling send() understands. Anything else is a typo, and a typo here
+#: is silent data loss: `htlm=` would send a message with no body at all.
+_SEND_PARAMS = frozenset(
+    {
+        "from", "from_", "to", "cc", "bcc", "reply_to", "replyTo", "subject",
+        "html", "text", "headers", "attachments", "tags", "idempotency_key",
+    }
+)
+
+
+def _reject_unknown_params(params: Mapping[str, Any]) -> None:
+    unknown = sorted(str(name) for name in params if name not in _SEND_PARAMS)
+    if not unknown:
+        return
+    hints = []
+    for name in unknown:
+        close = difflib.get_close_matches(name, sorted(_SEND_PARAMS), n=1)
+        hint = ' (did you mean "{}"?)'.format(close[0]) if close else ""
+        hints.append('"{}"{}'.format(name, hint))
+    raise ValidationError("unknown send() parameter: {}".format(", ".join(hints)))
+
+
+def _utf16_len(value: str) -> int:
+    """Length the way the server measures it: JavaScript's `.length`."""
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _pick(params: Mapping[str, Any], *names: str) -> Any:
@@ -286,6 +317,7 @@ class Emails:
             merged.update(params)
         merged.update(kwargs)
 
+        _reject_unknown_params(merged)
         body, idempotency_key = self._build_send_body(merged)
         payload = encode_json(body)
         if len(payload) > MAX_BYTES:

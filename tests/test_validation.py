@@ -199,3 +199,37 @@ class GetValidationTest(ValidationTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnknownParamsTest(ValidationTestCase):
+    def test_a_misspelt_parameter_is_refused_not_dropped(self) -> None:
+        # `htlm=` used to vanish silently and the message went out with no body.
+        err = self.assertRejectedLocally(
+            from_="a@acme.com", to="x@y.com", subject="Hi", htlm="<p>hi</p>"
+        )
+        self.assertIn('"htlm"', str(err))
+        self.assertIn('did you mean "html"', str(err))
+
+    def test_unknown_keys_in_the_dict_form_are_refused_too(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.client.emails.send({"from": "a@acme.com", "to": "x@y.com", "replyto": "r@acme.com"})
+        self.assertEqual(self.api.requests, [])
+
+
+class TagLengthUnitsTest(ValidationTestCase):
+    def test_tag_length_is_counted_like_the_server_counts_it(self) -> None:
+        # The server truncates at 64/256 JavaScript (UTF-16) units. An emoji is
+        # two of those, so 33 emoji is 66 units: over the key limit.
+        self.assertRejectedLocally(
+            from_="a@acme.com", to="x@y.com", subject="Hi", text="x", tags={"\U0001F600" * 33: "v"}
+        )
+        self.assertRejectedLocally(
+            from_="a@acme.com", to="x@y.com", subject="Hi", text="x", tags={"k": "\U0001F600" * 129}
+        )
+
+    def test_accented_tags_within_the_limit_still_pass(self) -> None:
+        self.api.enqueue_json(202, {"id": "1", "status": "queued"})
+        self.client.emails.send(
+            from_="a@acme.com", to="x@y.com", subject="Hi", text="x", tags={"ọ̀" * 30: "é" * 250}
+        )
+        self.assertEqual(len(self.api.requests), 1)
