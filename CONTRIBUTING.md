@@ -65,7 +65,25 @@ mypy
 
 ## Releasing
 
+Releases come from CI, on a tag. Nobody uploads from a laptop, and there is no
+PyPI token anywhere: `.github/workflows/release.yml` publishes with PyPI
+trusted publishing.
+
 1. Bump `__version__` in `src/nc_email/_version.py` (the build and the
    User-Agent both read it from there).
-2. Move the `Unreleased` changelog entries under the new version and date.
-3. Tag `v<version>`.
+2. Move the `Unreleased` changelog entries under `## [x.y.z] - YYYY-MM-DD` and
+   update the link definitions at the foot of the file.
+3. Tag and push: `git tag v<version> && git push origin v<version>`.
+
+The workflow runs the CI matrix, refuses a tag that disagrees with
+`__version__` or has no changelog section, builds the sdist and wheel, uploads
+them to PyPI, then creates the GitHub release from the changelog section.
+
+### One-time setup
+
+- **pypi.org → Your account → Publishing → Add a pending publisher** (before the
+  first upload; afterwards it is under the project's Settings → Publishing):
+  PyPI project `naijacloud-email`, owner `naijacloud`, repository
+  `nc-email-python`, workflow `release.yml`, environment `pypi`.
+- **GitHub → Settings → Environments → New environment `pypi`.** Add required
+  reviewers to make an upload wait for a human.
