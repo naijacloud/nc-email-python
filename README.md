@@ -71,7 +71,9 @@ nm.emails.send({
 
 ## The API
 
-The service has exactly two endpoints, so the SDK has exactly two methods.
+This release wraps two endpoints, send and retrieve. The API also has batch send,
+a message list, limits, domains and suppressions
+([API docs](https://naijacloud.com/docs/api/email)); they are not wrapped yet.
 
 | | |
 | --- | --- |
@@ -230,9 +232,9 @@ The rules the SDK enforces, and why:
   `nc_live_…`), so a bad key fails at deploy rather than as a 401 during a
   customer's checkout.
 
-A **test** key (`nmail_test_…`) is refused by the send path with `403`. That is
-deliberate: a staging box holding production credentials fails loudly instead of
-mailing real customers.
+A **test** key (`nmail_test_…`) is sandboxed: sends are recorded and answered
+with a real id, never delivered, so staging and CI can exercise the whole flow
+without mailing anyone. `Email.sandbox` is true for those messages.
 
 ### Which key
 
@@ -243,9 +245,13 @@ Two kinds work, and the SDK cannot tell them apart once it has one:
   credential CI deploys with. Add **Platform API** as well if the key also needs
   to manage sending domains or suppressions.
 - **`nmail_live_…` / `nmail_test_…`** — a Naijamail-only key from **Email**. The
-  test variant is refused by the send path with a `403`, on purpose, so a
-  staging box holding production credentials fails loudly instead of mailing
-  real customers. There is no test variant of a workspace key.
+  test variant is **sandboxed**: the API accepts the send, returns a real id
+  and a final status, and never hands the message to a mail server. Use one in
+  staging and CI. Send from any domain you have added, or from
+  `…@test.mail.naijacloud.dev`; send *to* `delivered@`, `bounced@` or
+  `complained@test.mail.naijacloud.dev` to get that outcome. A message sent
+  this way comes back from `get` with `sandbox` set to true. There is no test
+  variant of a workspace key.
 
 An `nc_pat_…` platform token is not accepted: those predate the Email send scope
 and the API refuses them on the mail routes, so the SDK refuses them at
