@@ -50,7 +50,7 @@ class RecordedRequest:
 
 
 class CannedResponse:
-    __slots__ = ("status", "body", "headers", "delay")
+    __slots__ = ("status", "body", "headers", "delay", "trickle")
 
     def __init__(
         self,
@@ -58,11 +58,15 @@ class CannedResponse:
         body: bytes = b"",
         headers: Optional[Dict[str, str]] = None,
         delay: float = 0.0,
+        trickle: float = 0.0,
     ) -> None:
         self.status = status
         self.body = body
         self.headers = headers or {}
         self.delay = delay
+        #: Seconds between body bytes: a server that never stalls long enough
+        #: to trip a per-read timeout, but never finishes either.
+        self.trickle = trickle
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -89,7 +93,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(canned.body)))
         self.end_headers()
-        if canned.body:
+        if canned.body and canned.trickle:
+            for index in range(len(canned.body)):
+                self.wfile.write(canned.body[index : index + 1])
+                self.wfile.flush()
+                time.sleep(canned.trickle)
+        elif canned.body:
             self.wfile.write(canned.body)
 
     do_GET = _respond

@@ -53,6 +53,9 @@ class NaijamailError(Exception):
         request_id: Optional[str] = None,
         body: Any = None,
         retryable: Optional[bool] = None,
+        raw_body: Optional[str] = None,
+        parsed_body: Any = None,
+        retry_after: Optional[float] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -62,6 +65,14 @@ class NaijamailError(Exception):
         # The raw decoded body, so a caller can inspect a field this SDK version
         # does not know about instead of waiting for a release.
         self.body = body
+        #: The response text exactly as received ("" for a local error or an
+        #: empty body), and the parsed JSON body (None when it did not parse).
+        #: Both always present, so a caller never guesses which `body` holds.
+        self.raw_body = raw_body if raw_body is not None else ""
+        self.parsed_body = parsed_body
+        #: Seconds from a `Retry-After` header on a retryable response, parsed
+        #: and clamped to 60. Honoured by the retry loop whatever the status.
+        self.retry_after = retry_after
         if retryable is not None:
             self.retryable = retryable
 
@@ -75,7 +86,8 @@ class NaijamailError(Exception):
 
 
 class ValidationError(NaijamailError):
-    """400/422, or a caller mistake caught here before any network call."""
+    """400, 413, 422 and any other unlisted 4xx, or a caller mistake caught here
+    before any network call. Either way the request as sent will never succeed."""
 
 
 class AuthenticationError(NaijamailError):
@@ -105,10 +117,6 @@ class RateLimitError(NaijamailError):
     """429. `retry_after` is seconds, already parsed from the header and clamped."""
 
     retryable = True
-
-    def __init__(self, message: str, *, retry_after: Optional[float] = None, **kwargs: Any) -> None:
-        super().__init__(message, **kwargs)
-        self.retry_after = retry_after
 
 
 class ServerError(NaijamailError):

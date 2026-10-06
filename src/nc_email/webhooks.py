@@ -1,12 +1,10 @@
 """Webhook signature verification (SDK-CONTRACT.md section 6).
 
-The control plane does not emit these yet — today the mail module only *ingests*
-provider webhooks from Mailgun and SES. The scheme is implemented here anyway so
-that both halves ship against one definition rather than two guesses. See the
-README before advertising it to customers.
+The control plane delivers event webhooks to per-team endpoints, signed as
+below. During a secret rotation the header carries two v1= values.
 
 Header:  NC-Signature: t=1756468800,v1=<hex sha256 hmac>
-Signed:  "<t>.<raw request body bytes>", HMAC-SHA256, lowercase hex.
+Signed:  "<t>.<raw request body bytes>", HMAC-SHA256, hex (compared case-insensitively).
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import time
 from typing import Any, List, Mapping, Optional, Tuple, Union
 
@@ -24,6 +23,8 @@ from .types import WebhookEvent
 #: Five minutes. Long enough to survive a slow queue or a clock a little out of
 #: step, short enough that a captured request is not a replay a day later.
 DEFAULT_TOLERANCE_SECONDS = 300
+
+_TIMESTAMP_RE = re.compile(r"[0-9]{1,12}")
 
 
 def _parse_signature_header(header: str) -> Tuple[int, List[str]]:
@@ -36,12 +37,14 @@ def _parse_signature_header(header: str) -> Tuple[int, List[str]]:
         name = name.strip()
         value = value.strip()
         if name == "t" and timestamp is None:
-            try:
-                timestamp = int(value)
-            except ValueError:
+            # 1-12 ASCII digits and nothing else (SDK-CONTRACT.md section 6).
+            # int() alone accepts "+1", "1_000", " 1" and Arabic-Indic digits,
+            # and an unbounded one overflows float arithmetic below.
+            if not _TIMESTAMP_RE.fullmatch(value):
                 raise WebhookVerificationError(
-                    "signature header has a non-numeric timestamp"
-                ) from None
+                    "signature header has a malformed timestamp"
+                )
+            timestamp = int(value)
         elif name == "v1":
             # Several are legal and expected: during a secret rotation the
             # sender signs with both the old and the new secret so neither end
@@ -65,7 +68,7 @@ def _as_bytes(payload: Any) -> bytes:
     """
     if isinstance(payload, bytes):
         return payload
-    if isinstance(payload, bytearray):
+    if isinstance(payload, (bytearray, memoryview)):
         return bytes(payload)
     if isinstance(payload, str):
         return payload.encode("utf-8")
@@ -83,7 +86,7 @@ class Webhooks:
 
     @staticmethod
     def verify(
-        payload: Union[bytes, bytearray, str],
+        payload: Union[bytes, bytearray, memoryview, str],
         signature_header: Optional[str],
         secret: Union[str, bytes],
         tolerance: int = DEFAULT_TOLERANCE_SECONDS,
@@ -127,7 +130,9 @@ class Webhooks:
 
         timestamp, signatures = _parse_signature_header(signature_header)
 
-        drift = abs(time.time() - timestamp)
+        # Whole seconds, as the sender stamps them: with a fractional `now`,
+        # a tolerance of 0 would refuse even a signature from this second.
+        drift = abs(int(time.time()) - timestamp)
         if drift > tolerance:
             # Checked before the HMAC so a replayed-but-genuine request is
             # rejected on its age rather than accepted on its signature. This is

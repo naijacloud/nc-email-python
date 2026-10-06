@@ -9,6 +9,7 @@ DKIM-signed domain, which is a phishing incident with our DNS vouching for it.
 
 from __future__ import annotations
 
+import math
 import os
 import platform
 import re
@@ -51,6 +52,18 @@ API_KEY_PREFIXES = ("nmail_live_", "nmail_test_", "nc_live_")
 #: credential on the wire in clear.
 PLAINTEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
+#: The ceiling on `max_retries`. Eleven attempts with an 8s backoff cap is
+#: already the better part of two minutes; more is never what a caller wants.
+MAX_RETRIES_CEILING = 10
+
+#: Refusal for the pre-scopes platform token, worded exactly as in
+#: SDK-CONTRACT.md section 1 so every SDK says the same thing.
+PAT_KEY_MESSAGE = (
+    "this is a personal access token (nc_pat_…), which cannot send mail; use a mail "
+    "API key (nmail_live_… or nmail_test_…) or a workspace API key with the Email "
+    "send scope (nc_live_…)"
+)
+
 
 def redact_key(api_key: str) -> str:
     """`nmail_live_***`.
@@ -76,6 +89,11 @@ def _default_user_agent(suffix: Optional[str] = None) -> str:
 
 def _validate_base_url(base_url: str) -> str:
     parsed = urllib.parse.urlsplit(base_url)
+    if parsed.query or parsed.fragment or "?" in base_url or "#" in base_url:
+        # Stripping it silently would send requests somewhere other than where
+        # the caller pointed us; appending /v1/emails after it would send them
+        # somewhere else again. Neither is a guess worth making.
+        raise ValidationError("base_url must not contain a query string or a fragment")
     if not parsed.scheme or not parsed.netloc:
         raise ValidationError(
             "base_url must be an absolute URL such as https://api.naijacloud.com, got {!r}".format(
@@ -141,6 +159,8 @@ class Naijamail:
                     API_KEY_ENV_VAR
                 )
             )
+        if key.startswith("nc_pat_"):
+            raise ValidationError(PAT_KEY_MESSAGE)
         if not API_KEY_PATTERN.fullmatch(key):
             # The key itself is never echoed, here least of all: a construction
             # error is exactly the kind of thing that ends up in a CI log.
@@ -149,13 +169,27 @@ class Naijamail:
                 "nmail_test_… or nc_live_…)"
             )
 
-        resolved_base = base_url or os.environ.get(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL
+        # A blank NAIJAMAIL_BASE_URL (an empty `export` in a deploy config) means
+        # unset, not "refuse to start" — SDK-CONTRACT.md section 1.
+        env_base = (os.environ.get(BASE_URL_ENV_VAR) or "").strip()
+        resolved_base = base_url or env_base or DEFAULT_BASE_URL
         resolved_base = _validate_base_url(_require_text(resolved_base, "base_url"))
 
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
             raise ValidationError("timeout must be a positive number of seconds")
-        if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0:
-            raise ValidationError("max_retries must be a non-negative integer")
+        if (
+            not isinstance(max_retries, int)
+            or isinstance(max_retries, bool)
+            or not 0 <= max_retries <= MAX_RETRIES_CEILING
+        ):
+            raise ValidationError(
+                "max_retries must be an integer from 0 to {}".format(MAX_RETRIES_CEILING)
+            )
 
         if user_agent_suffix is not None:
             user_agent_suffix = _require_text(user_agent_suffix, "user_agent_suffix")

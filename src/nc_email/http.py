@@ -9,7 +9,9 @@ library is the smaller attack surface, and the code it costs us is this file.
 
 from __future__ import annotations
 
+import functools
 import http.client
+import io
 import json
 import random
 import socket
@@ -66,6 +68,117 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# -- the per-attempt deadline ---------------------------------------------------
+#
+# urllib's `timeout` is a per-socket-operation timeout: each connect, send and
+# recv gets the full allowance afresh, so a server (or a broken middlebox) that
+# trickles one byte every few seconds keeps a "30s" request alive indefinitely.
+# SDK-CONTRACT.md section 4 makes `timeout` a deadline for the whole attempt.
+# The pieces below carry a monotonic deadline on the Request into the
+# connection, and re-arm the socket timeout to whatever is *left* before every
+# send and every read — so the attempt ends at the deadline however the bytes
+# are paced, without a watchdog thread per request.
+
+
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        # settimeout(0) would mean non-blocking, not "expired".
+        raise socket.timeout("the per-attempt deadline expired")
+    return left
+
+
+class _DeadlineRaw(io.RawIOBase):
+    """Reads from a socket file, re-arming the socket timeout to the time left."""
+
+    def __init__(self, sock: Any, deadline: float) -> None:
+        super().__init__()
+        self._sock = sock
+        # Unbuffered SocketIO: it takes an io reference on the socket, which is
+        # what keeps the descriptor open after urllib closes the connection's
+        # own handle right after reading the headers.
+        self._io = sock.makefile("rb", buffering=0)
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> Optional[int]:  # type: ignore[override]
+        self._sock.settimeout(_remaining(self._deadline))
+        return self._io.readinto(buffer)  # type: ignore[no-any-return]
+
+    def close(self) -> None:
+        if not self.closed:
+            self._io.close()
+        super().close()
+
+
+class _DeadlineSocket:
+    """Just enough of a socket for HTTPResponse, which only calls makefile()."""
+
+    def __init__(self, sock: Any, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def makefile(self, mode: str = "rb", *args: Any, **kwargs: Any) -> io.BufferedReader:
+        return io.BufferedReader(_DeadlineRaw(self._sock, self._deadline))
+
+
+class _DeadlineResponse(http.client.HTTPResponse):
+    def __init__(self, sock: Any, *args: Any, nc_deadline: float, **kwargs: Any) -> None:
+        super().__init__(_DeadlineSocket(sock, nc_deadline), *args, **kwargs)  # type: ignore[arg-type]
+
+
+def _deadline_connection(base: Any) -> Any:
+    class _Connection(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, nc_deadline: Optional[float] = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._nc_deadline = nc_deadline
+            if nc_deadline is not None:
+                self.response_class = functools.partial(
+                    _DeadlineResponse, nc_deadline=nc_deadline
+                )
+
+        def connect(self) -> None:
+            if self._nc_deadline is not None:
+                # TCP connect and the TLS handshake run with what is left.
+                self.timeout = _remaining(self._nc_deadline)
+            super().connect()
+
+        def send(self, data: Any) -> None:
+            if self._nc_deadline is not None and self.sock is not None:
+                # sendall's timeout bounds the whole call (Python 3.5+).
+                self.sock.settimeout(_remaining(self._nc_deadline))
+            super().send(data)
+
+    _Connection.__name__ = "_Deadline" + base.__name__
+    return _Connection
+
+
+_DEADLINE_CONNECTIONS: Dict[Any, Any] = {
+    http.client.HTTPConnection: _deadline_connection(http.client.HTTPConnection),
+    http.client.HTTPSConnection: _deadline_connection(http.client.HTTPSConnection),
+}
+
+
+def _bind_deadline(http_class: Any, req: urllib.request.Request) -> Any:
+    deadline = getattr(req, "_nc_deadline", None)
+    wrapped = _DEADLINE_CONNECTIONS.get(http_class)
+    if deadline is None or wrapped is None:
+        return http_class
+    return functools.partial(wrapped, nc_deadline=deadline)
+
+
+class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        return super().do_open(_bind_deadline(http_class, req), req, **kwargs)
+
+
+class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        return super().do_open(_bind_deadline(http_class, req), req, **kwargs)
+
+
 def build_opener(ssl_context: Optional[ssl.SSLContext] = None) -> urllib.request.OpenerDirector:
     """Build an opener with certificate verification on and redirects off.
 
@@ -81,7 +194,7 @@ def build_opener(ssl_context: Optional[ssl.SSLContext] = None) -> urllib.request
     context.verify_mode = ssl.CERT_REQUIRED
     context.check_hostname = True
     return urllib.request.build_opener(
-        _NoRedirectHandler, urllib.request.HTTPSHandler(context=context)
+        _NoRedirectHandler, _DeadlineHTTPHandler, _DeadlineHTTPSHandler(context=context)
     )
 
 
@@ -158,7 +271,13 @@ def _error_for_response(
         "error": label,
         "request_id": request_id,
         "body": body,
+        "raw_body": text,
+        "parsed_body": parsed,
     }
+    if status in (408, 429) or status >= 500:
+        # Honoured on any retryable response, not only a 429: a 503 from a
+        # load balancer draining a node says when to come back just as clearly.
+        common["retry_after"] = parse_retry_after(headers.get("retry-after"))
 
     if 300 <= status < 400:
         # Reported as a server error because the server did something we cannot
@@ -185,14 +304,14 @@ def _error_for_response(
         # and no retry will shrink it.
         return ValidationError(message, **common)
     if status == 429:
-        return RateLimitError(
-            message, retry_after=parse_retry_after(headers.get("retry-after")), **common
-        )
+        return RateLimitError(message, **common)
     if status >= 500:
         return ServerError(message, **common)
-    # Some other 4xx (402, 451, whatever a proxy invents). The base class, not
-    # ValidationError: telling a caller their input was bad when it was a
-    # payment or legal block sends them debugging the wrong thing.
+    if 400 <= status < 500:
+        # Some other 4xx (405, 415, 451, whatever a proxy invents). The request
+        # as sent will never succeed, which is what ValidationError tells a
+        # caller — the same answer in all five SDKs (SDK-CONTRACT.md section 3).
+        return ValidationError(message, **common)
     return NaijamailError(message, **common)
 
 
@@ -284,6 +403,7 @@ class Transport:
         request = urllib.request.Request(  # noqa: S310
             url, data=payload, headers=dict(headers), method=method
         )
+        request._nc_deadline = time.monotonic() + self._timeout  # type: ignore[attr-defined]
         try:
             with self._opener.open(request, timeout=self._timeout) as raw_response:
                 status = raw_response.getcode()
@@ -329,15 +449,17 @@ class Transport:
         parsed, text = _decode_body(body)
         if parsed is None and text.strip():
             # A 2xx that is not JSON is an intermediary talking, not the API.
-            # Retryable, and safe to retry because every send carries a pinned
-            # idempotency key: a repeat returns the original message.
+            # Not retried: the request may well have been accepted, and the same
+            # intermediary will answer the same way next time.
             raise ServerError(
-                "expected a JSON response, got {} bytes of {}".format(
+                "malformed response: expected JSON, got {} bytes of {}".format(
                     len(body), response_headers.get("content-type", "unknown content type")
                 ),
                 status_code=status,
                 request_id=response_headers.get("x-request-id"),
                 body=text,
+                raw_body=text,
+                retryable=False,
             )
         return Response(status, response_headers, parsed)
 

@@ -42,10 +42,6 @@ class ConstructionTest(unittest.TestCase):
             "nmail_live_",
             "nmail_live_short",
             "nmail_prod_abcdefgh",
-            # The pre-scopes platform token. The API refuses it on the mail
-            # routes outright — it predates the Email send scope and was never
-            # granted mail access — so this fails here rather than at send time.
-            "nc_pat_0123456789abcdef",
             # There is no test variant of a workspace key; the live/test split
             # belongs to the nmail_ family.
             "nc_test_0123456789abcdef",
@@ -54,6 +50,21 @@ class ConstructionTest(unittest.TestCase):
             with self.subTest(key=bad):
                 with self.assertRaises(ValidationError):
                     Naijamail(bad)
+
+    def test_a_personal_access_token_gets_the_contract_message(self) -> None:
+        # The pre-scopes platform token: the API refuses it on the mail routes,
+        # so it fails here — and says why, in the wording all five SDKs share.
+        for key in ("nc_pat_0000000000000000", "  nc_pat_0000000000000000\n", "nc_pat_x"):
+            with self.subTest(key=key):
+                with self.assertRaises(ValidationError) as caught:
+                    Naijamail(key)
+                self.assertEqual(
+                    str(caught.exception),
+                    "this is a personal access token (nc_pat_…), which cannot send mail; "
+                    "use a mail API key (nmail_live_… or nmail_test_…) or a workspace API "
+                    "key with the Email send scope (nc_live_…)",
+                )
+                self.assertNotIn("0000000000000000", str(caught.exception))
 
     def test_accepts_live_and_test_keys(self) -> None:
         self.assertTrue(Naijamail("nmail_live_abcdefgh").masked_api_key.startswith("nmail_live_"))
@@ -78,6 +89,31 @@ class ConstructionTest(unittest.TestCase):
             else:
                 os.environ["NAIJAMAIL_BASE_URL"] = previous
 
+    def test_a_blank_base_url_variable_means_unset(self) -> None:
+        previous = os.environ.get("NAIJAMAIL_BASE_URL")
+        try:
+            for blank in ("", "   "):
+                with self.subTest(value=blank):
+                    os.environ["NAIJAMAIL_BASE_URL"] = blank
+                    self.assertEqual(Naijamail(TEST_KEY).base_url, "https://api.naijacloud.com")
+        finally:
+            if previous is None:
+                os.environ.pop("NAIJAMAIL_BASE_URL", None)
+            else:
+                os.environ["NAIJAMAIL_BASE_URL"] = previous
+
+    def test_a_base_url_with_a_query_or_fragment_is_refused(self) -> None:
+        for url in (
+            "https://api.example.com/?region=eu",
+            "https://api.example.com?",
+            "https://api.example.com/#x",
+            "http://localhost:4000/?a=b",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValidationError) as caught:
+                    Naijamail(TEST_KEY, base_url=url)
+                self.assertIn("query string", str(caught.exception))
+
     def test_trailing_slash_is_trimmed(self) -> None:
         # Otherwise every request path becomes //v1/emails.
         self.assertEqual(
@@ -90,10 +126,13 @@ class ConstructionTest(unittest.TestCase):
             Naijamail(TEST_KEY, base_url="api.naijacloud.com")
 
     def test_rejects_bad_options(self) -> None:
-        for kwargs in [{"timeout": 0}, {"timeout": -1}, {"timeout": "30"}, {"max_retries": -1}, {"max_retries": 1.5}]:
+        for kwargs in [{"timeout": 0}, {"timeout": -1}, {"timeout": "30"}, {"timeout": float("nan")}, {"timeout": float("inf")}, {"max_retries": -1}, {"max_retries": 1.5}, {"max_retries": 11}]:
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValidationError):
                     Naijamail(TEST_KEY, **kwargs)  # type: ignore[arg-type]
+
+    def test_max_retries_of_ten_is_the_ceiling(self) -> None:
+        self.assertEqual(Naijamail(TEST_KEY, max_retries=10).max_retries, 10)
 
     def test_user_agent_shape(self) -> None:
         agent = Naijamail(TEST_KEY).user_agent

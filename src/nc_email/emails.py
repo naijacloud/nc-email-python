@@ -32,7 +32,10 @@ MAX_HEADERS = 25
 MAX_TAGS = 10
 MAX_TAG_KEY_LENGTH = 64
 MAX_TAG_VALUE_LENGTH = 256
-MAX_IDEMPOTENCY_KEY_LENGTH = 255
+#: Counted in bytes of UTF-8, the way the server stores it — not characters.
+MAX_IDEMPOTENCY_KEY_BYTES = 255
+#: Kept for callers who imported the old name; same value, now bytes.
+MAX_IDEMPOTENCY_KEY_LENGTH = MAX_IDEMPOTENCY_KEY_BYTES
 
 #: Overriding any of these would let a caller set a From/To/Subject the server
 #: never authorised, sidestepping the domain check the real From is measured
@@ -98,7 +101,7 @@ def _normalise_recipients(value: Any, label: str) -> List[str]:
     return addresses
 
 
-def _encode_attachment_content(value: Any, label: str) -> str:
+def _encode_attachment_content(value: Any, label: str) -> Tuple[str, int]:
     """Bytes in, base64 on the wire.
 
     A caller who hand-encodes is a caller who eventually gets it subtly wrong,
@@ -111,11 +114,15 @@ def _encode_attachment_content(value: Any, label: str) -> str:
     A file *path* is never accepted. An SDK that opens arbitrary paths on the
     caller's behalf is a local-file-read primitive the moment one of those paths
     comes from an HTTP request.
+
+    Returns the base64 text and the decoded size, which is what the size limit
+    is measured on.
     """
-    if isinstance(value, (bytes, bytearray)):
-        if not value:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if not raw:
             raise ValidationError("{} content is empty".format(label))
-        return base64.b64encode(bytes(value)).decode("ascii")
+        return base64.b64encode(raw).decode("ascii"), len(raw)
 
     if isinstance(value, str):
         compact = "".join(value.split())  # line wrapping is legal in base64
@@ -137,7 +144,7 @@ def _encode_attachment_content(value: Any, label: str) -> str:
             ) from None
         if not decoded:
             raise ValidationError("{} content is empty".format(label))
-        return compact
+        return compact, len(decoded)
 
     raise ValidationError(
         "{} content must be bytes (preferred) or a base64 string, got {}".format(
@@ -146,13 +153,15 @@ def _encode_attachment_content(value: Any, label: str) -> str:
     )
 
 
-def _build_attachments(value: Any) -> List[Dict[str, str]]:
+def _build_attachments(value: Any) -> Tuple[List[Dict[str, str]], int]:
+    """The wire attachments, and their total decoded size in bytes."""
     if value is None:
-        return []
+        return [], 0
     if not isinstance(value, (list, tuple)):
         raise ValidationError("attachments must be a list")
 
     built: List[Dict[str, str]] = []
+    total = 0
     for index, item in enumerate(value):
         label = "attachments[{}]".format(index)
         if not isinstance(item, Mapping):
@@ -172,10 +181,9 @@ def _build_attachments(value: Any) -> List[Dict[str, str]]:
         if not filename.strip():
             raise ValidationError("{} filename must not be empty".format(label))
 
-        attachment: Dict[str, str] = {
-            "filename": filename,
-            "content": _encode_attachment_content(item["content"], label),
-        }
+        encoded, size = _encode_attachment_content(item["content"], label)
+        total += size
+        attachment: Dict[str, str] = {"filename": filename, "content": encoded}
         content_type = item.get("content_type", item.get("contentType"))
         if content_type is not None:
             attachment["content_type"] = _reject_control_chars(
@@ -189,7 +197,7 @@ def _build_attachments(value: Any) -> List[Dict[str, str]]:
                 "{} content_id".format(label),
             )
         built.append(attachment)
-    return built
+    return built, total
 
 
 def _build_headers(value: Any) -> Dict[str, str]:
@@ -318,31 +326,57 @@ class Emails:
         merged.update(kwargs)
 
         _reject_unknown_params(merged)
-        body, idempotency_key = self._build_send_body(merged)
-        payload = encode_json(body)
-        if len(payload) > MAX_BYTES:
+        try:
+            body, idempotency_key, message_bytes = self._build_send_body(merged)
+        except UnicodeEncodeError:
+            # A lone surrogate (half an emoji, from a bad slice or a bad decode)
+            # cannot be written as UTF-8; say so rather than leak a codec error.
             raise ValidationError(
-                "message is {} bytes encoded, over the {} byte limit".format(
-                    len(payload), MAX_BYTES
-                )
+                "a field contains text that is not valid UTF-8 (a lone surrogate)"
+            ) from None
+        # Measured the way the server measures it (SDK-CONTRACT.md section 5.7):
+        # html + text as UTF-8 plus the *decoded* attachment bytes. Measuring the
+        # encoded JSON refused 7.5–10 MiB attachments the server would take.
+        if message_bytes > MAX_BYTES:
+            raise ValidationError(
+                "message is {} bytes (html + text + attachments), over the {} byte "
+                "limit".format(message_bytes, MAX_BYTES)
             )
+        try:
+            payload = encode_json(body)
+        except UnicodeEncodeError:
+            raise ValidationError(
+                "a field contains text that is not valid UTF-8 (a lone surrogate)"
+            ) from None
 
         response = self._transport.request(
             "POST",
             "/v1/emails",
             payload=payload,
-            # Sent as a header because that is what takes precedence server-side;
-            # also left in the body so an intermediary that strips unknown
-            # headers cannot turn a retry into a second email.
-            extra_headers={"Idempotency-Key": idempotency_key},
+            # Header only (SDK-CONTRACT.md section 2): the server reads the header
+            # first, so a body copy is redundant and two copies can only
+            # disagree. http.client writes header values as Latin-1, so the
+            # UTF-8 bytes are smuggled through as their Latin-1 spelling — the
+            # wire then carries exactly the key's UTF-8 bytes.
+            extra_headers={
+                "Idempotency-Key": idempotency_key.encode("utf-8").decode("latin-1")
+            },
         )
         data = response.data
-        if not isinstance(data, Mapping) or not data.get("id"):
+        if (
+            not isinstance(data, Mapping)
+            or not isinstance(data.get("id"), str)
+            or not data["id"]
+        ):
+            # Raised after the transport returned, so it is never retried: the
+            # message may well have been accepted.
             raise ServerError(
-                "send response did not contain a message id",
+                "malformed response: the send response did not contain a message id",
                 status_code=response.status,
                 request_id=response.request_id,
                 body=data,
+                parsed_body=data,
+                retryable=False,
             )
         return SendEmailResponse.from_dict(data)
 
@@ -368,7 +402,9 @@ class Emails:
             )
         return Email.from_dict(data)
 
-    def _build_send_body(self, params: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def _build_send_body(
+        self, params: Mapping[str, Any]
+    ) -> Tuple[Dict[str, Any], str, int]:
         sender = _pick(params, "from_", "from")
         if sender is None:
             raise ValidationError('"from" is required (pass from_= or {"from": ...})')
@@ -412,17 +448,21 @@ class Emails:
         if reply_to:
             body["reply_to"] = reply_to
 
+        message_bytes = 0
         html = params.get("html")
         if html is not None:
             body["html"] = _require_str(html, '"html"')
+            message_bytes += len(body["html"].encode("utf-8"))
         text = params.get("text")
         if text is not None:
             body["text"] = _require_str(text, '"text"')
+            message_bytes += len(body["text"].encode("utf-8"))
 
         headers = _build_headers(params.get("headers"))
         if headers:
             body["headers"] = headers
-        attachments = _build_attachments(params.get("attachments"))
+        attachments, attachment_bytes = _build_attachments(params.get("attachments"))
+        message_bytes += attachment_bytes
         if attachments:
             body["attachments"] = attachments
         tags = _build_tags(params.get("tags"))
@@ -431,27 +471,28 @@ class Emails:
 
         supplied = params.get("idempotency_key")
         if supplied is not None:
-            idempotency_key = _require_str(supplied, "idempotency_key")
+            _require_str(supplied, "idempotency_key")
+        if supplied is not None and supplied.strip():
+            idempotency_key = supplied
             # It becomes an HTTP header, so a newline in it is an injection into
             # our own request, not just the message.
             _reject_control_chars(idempotency_key, "idempotency_key")
-            if not idempotency_key.strip():
-                raise ValidationError("idempotency_key must not be empty")
-            if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+            size = len(idempotency_key.encode("utf-8"))
+            if size > MAX_IDEMPOTENCY_KEY_BYTES:
                 raise ValidationError(
-                    "idempotency_key is longer than {} characters".format(
-                        MAX_IDEMPOTENCY_KEY_LENGTH
+                    "idempotency_key is {} bytes of UTF-8, over the {}-byte limit".format(
+                        size, MAX_IDEMPOTENCY_KEY_BYTES
                     )
                 )
         else:
+            # An empty key counts as none supplied (SDK-CONTRACT.md section 5.4).
             # Generated once per send() call and reused across every retry of
             # that call. Without it the retry policy in SDK-CONTRACT.md section 4
             # would double-mail a customer every time a response was lost in
             # transit — which is the common failure, not the exotic one.
             idempotency_key = str(uuid.uuid4())
-        body["idempotency_key"] = idempotency_key
 
-        return body, idempotency_key
+        return body, idempotency_key, message_bytes
 
     def __repr__(self) -> str:
         return "<nc_email.Emails>"

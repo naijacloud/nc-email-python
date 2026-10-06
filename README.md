@@ -92,10 +92,10 @@ exist server-side, and a method that 404s is worse than no method.
 | `cc`, `bcc`, `reply_to` | `str` \| `list[str]` | no | `replyTo` is accepted as well; the SDK always sends `reply_to`. |
 | `subject` | `str` | no | Defaults to `""`, and is always sent. |
 | `html`, `text` | `str` | no | |
-| `headers` | `dict[str, str]` | no | At most 25. `From`, `To`, `Cc`, `Bcc`, `Subject`, `DKIM-Signature` and `Received` are refused. |
+| `headers` | `dict[str, str]` | no | At most 25. `From`, `To`, `Cc`, `Bcc`, `Subject`, `DKIM-Signature` and `Received` are refused, case-insensitively and with surrounding whitespace ignored (`" From"` is refused too). |
 | `attachments` | `list[dict]` | no | `{filename, content, content_type?, content_id?}` |
 | `tags` | `dict[str, str]` | no | At most 10; keys up to 64 chars, values up to 256. |
-| `idempotency_key` | `str` | no | One is generated for you if you leave it out. |
+| `idempotency_key` | `str` | no | One is generated for you if you leave it out or pass `""`. At most 255 bytes of UTF-8. Sent as the `Idempotency-Key` header only. |
 
 `SendEmailResponse.rejected` is always a list, empty when nobody was rejected —
 the API omits the field entirely in that case, and you should not have to branch
@@ -103,6 +103,11 @@ on absence. A non-empty `rejected` is not an error: those recipients are on the
 suppression list and the rest of the message still went out.
 
 `Email.from_` carries the same trailing underscore, for the same reason.
+
+`Email.created_at` and `Email.delivered_at` are the ISO 8601 strings the API
+sends (`"2026-08-29T10:00:00.000Z"`), not `datetime` objects — parse them with
+`datetime.fromisoformat(value.replace("Z", "+00:00"))` if you need one. The other
+SDKs surface their language's own date type; that difference is deliberate.
 
 Statuses arrive as plain lowercase strings: `queued`, `sent`, `delivered`,
 `bounced`, `deferred`, `complained`, `rejected`, `failed`. Compare them against
@@ -128,8 +133,9 @@ nm.emails.send(
 )
 ```
 
-A `str` is accepted only as already-encoded base64, and is validated strictly
-rather than silently mangled. A file **path** is never accepted: an SDK that
+`bytes`, `bytearray` and `memoryview` are raw content. A `str` is accepted only
+as already-encoded base64, and is validated strictly rather than silently
+mangled. Empty content is refused (the API refuses it too). A file **path** is never accepted: an SDK that
 opens arbitrary paths on your behalf becomes a local-file-read primitive the
 moment one of those paths comes from an HTTP request. Read the file yourself.
 
@@ -139,11 +145,17 @@ moment one of those paths comes from an HTTP request. Read the file yourself.
 nm = Naijamail(
     api_key=None,             # else NAIJAMAIL_API_KEY
     base_url=None,            # else NAIJAMAIL_BASE_URL, else https://api.naijacloud.com
-    timeout=30.0,             # seconds, per attempt
-    max_retries=2,            # 3 attempts in total
+    timeout=30.0,             # seconds, a deadline for each whole attempt; must be > 0
+    max_retries=2,            # 3 attempts in total; 0 to 10
     user_agent_suffix=None,   # appended to nc-email-python/<version> (python/<version>)
 )
 ```
+
+A blank `NAIJAMAIL_BASE_URL` counts as unset. A `base_url` carrying a query
+string or a fragment is refused rather than silently stripped. `timeout` bounds
+connecting, sending and reading the whole response together — a server that
+trickles bytes cannot keep an attempt alive past it — and each retry gets a fresh
+deadline.
 
 A client owns its key, its base URL and its HTTP opener. Nothing is held at
 module level, so two clients with two keys in one process cannot interfere.
@@ -152,7 +164,10 @@ module level, so two clients with two keys in one process cannot interfere.
 
 Every failure is a subclass of `NaijamailError`, carrying `message`,
 `status_code`, `error` (the server's short label), `request_id` (from
-`x-request-id`) and the raw `body`.
+`x-request-id`), `raw_body` (the response text exactly as received, `""` for a
+local error) and `parsed_body` (the decoded JSON, or `None` if it was not JSON).
+`body` is kept for compatibility: the parsed JSON when there was some, otherwise
+the text.
 
 | HTTP | Exception | Retried |
 | --- | --- | --- |
@@ -162,11 +177,13 @@ Every failure is a subclass of `NaijamailError`, carrying `message`,
 | 404 | `NotFoundError` | no |
 | 408 | `NaijamailTimeoutError` | yes |
 | 409 | `ConflictError` | no |
-| 422 | `ValidationError` | no |
-| 429 | `RateLimitError` (`.retry_after` in seconds) | yes |
+| 413, 422 | `ValidationError` | no |
+| any other 4xx (405, 415, 451…) | `ValidationError` | no |
+| 429 | `RateLimitError` (`.retry_after` in seconds, at most 60) | yes |
 | 5xx | `ServerError` | yes |
 | socket / DNS / TLS | `NaijamailConnectionError` | yes |
 | client-side deadline | `NaijamailTimeoutError` | yes |
+| 2xx that is not JSON, or a send response with no `id` | `ServerError` ("malformed response") | no |
 | caught before sending | `ValidationError` (`status_code == 0`) | no |
 
 ```python
@@ -198,8 +215,9 @@ and connection or timeout failures. Never on any other `4xx` — a `403` for an
 unverified domain will not succeed on the second try.
 
 Backoff is exponential with full jitter (`random(0, min(8s, 0.5s * 2^attempt))`).
-A `Retry-After` header overrides it, in either its integer-seconds or its
-HTTP-date spelling, clamped to 60 seconds.
+A `Retry-After` header overrides it on any retried response — a `503` as well
+as a `429` — in either its integer-seconds or its HTTP-date spelling, clamped to
+60 seconds. It is exposed as `.retry_after` on the error.
 
 Retrying a `POST` is only safe because of idempotency. If you do not supply an
 `idempotency_key`, the SDK generates one UUIDv4 per `send()` call and sends it as
@@ -224,13 +242,17 @@ The rules the SDK enforces, and why:
   User-Agent all show `nmail_live_***`; the key is not an attribute of the
   client object; the client refuses to pickle.
 - **Header-injection defence.** CR, LF or NUL in `from`, any address, `subject`,
-  a custom header name or value, an attachment filename, or the idempotency key
+  a custom header name or value, an attachment filename, `content_type` or
+  `content_id`, or the idempotency key
   is rejected before any network call.
 - **Client-side limits**, mirroring the server: 50 recipients across
-  `to`+`cc`+`bcc`, 10 MiB encoded, 25 headers, 10 tags.
+  `to`+`cc`+`bcc`, 10 MiB of message, 25 headers, 10 tags. The size is
+  measured the way the server measures it: `html` and `text` as UTF-8 plus the
+  **decoded** attachment bytes — so a 9 MiB attachment goes through even though
+  it is ~12 MiB once base64-encoded.
 - **Key shape is checked at construction** (`nmail_live_…`, `nmail_test_…` or
-  `nc_live_…`), so a bad key fails at deploy rather than as a 401 during a
-  customer's checkout.
+  `nc_live_…`, surrounding whitespace trimmed), so a bad key fails at deploy
+  rather than as a 401 during a customer's checkout.
 
 A **test** key (`nmail_test_…`) is sandboxed: sends are recorded and answered
 with a real id, never delivered, so staging and CI can exercise the whole flow
@@ -255,7 +277,8 @@ Two kinds work, and the SDK cannot tell them apart once it has one:
 
 An `nc_pat_…` platform token is not accepted: those predate the Email send scope
 and the API refuses them on the mail routes, so the SDK refuses them at
-construction rather than a request later.
+construction rather than a request later, with a message saying it is a personal
+access token and which keys to use instead.
 
 Report a vulnerability to security@naijacloud.com. See [SECURITY.md](SECURITY.md).
 
@@ -286,9 +309,11 @@ def handle():
 The header is `NC-Signature: t=<unix seconds>,v1=<hex sha256 hmac>`, over
 `"<t>.<raw body>"`. Several `v1=` values may be present during a secret
 rotation, and any one matching is enough. Timestamps outside 300 seconds are
-rejected, which is what stops a captured request being replayed later. The
-comparison is constant-time, and a failure never tells you the expected
-signature.
+rejected, which is what stops a captured request being replayed later;
+`tolerance=0` means strict (this second only), not "the default". `t` must be
+plain ASCII digits (at most 12), the hex signature is compared
+case-insensitively, and the payload must be a JSON object. The comparison is
+constant-time, and a failure never tells you the expected signature.
 
 Pass the **raw bytes**. A parsed object re-serialised differs from what was
 signed by key order and spacing, so it would fail verification at random.

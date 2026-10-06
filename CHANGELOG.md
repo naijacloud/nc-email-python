@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-07
+
+Conformance with the other four Naijamail SDKs (TGL-741). Several of these
+change behaviour; read the **Changed** list before upgrading.
+
+### Changed
+
+- **The 10 MiB size check measures what the server measures**: `html` + `text`
+  as UTF-8 plus the *decoded* attachment bytes. It used to measure the whole
+  encoded JSON, refusing 7.5–10 MiB attachments the API would have accepted.
+- **Any 4xx without its own error type (405, 415, 451…) is a
+  `ValidationError`**, not the base `NaijamailError`.
+- **A `base_url` with a query string or fragment is refused** with a
+  `ValidationError`. It used to be stripped silently.
+- **The idempotency key is sent in the `Idempotency-Key` header only**, no
+  longer duplicated in the JSON body. Its 255 limit is counted in bytes of UTF-8,
+  and it goes on the wire as UTF-8 (a non-ASCII key used to fail inside
+  `http.client`).
+- **An empty `idempotency_key=""` generates a key** instead of raising.
+- **`timeout` is a deadline for the whole attempt** — connect, send and reading
+  the complete response — not a per-socket-read timeout that a server
+  trickling bytes could stretch indefinitely.
+- **`Retry-After` is honoured on any retried response**, a `503` included, not
+  only a `429`; `retry_after` is now on every error (None when absent).
+- **A 2xx that is not JSON is no longer retried**; it raises
+  `ServerError("malformed response…")` straight away.
+- `max_retries` must be from 0 to 10.
+- Webhook timestamps must be 1–12 ASCII digits: `+`, `_`, spaces and non-ASCII
+  digits are refused, and a huge `t` is a `WebhookVerificationError` rather than
+  an `OverflowError`. The skew is computed in whole seconds, so `tolerance=0`
+  accepts a signature from the current second.
+
+### Added
+
+- `raw_body` (the response text as received) and `parsed_body` (the decoded
+  JSON, or `None`) on every error. `body` is unchanged.
+- An `nc_pat_…` key gets a specific message — it is a personal access token,
+  use a mail API key or an `nc_live_…` key with the Email send scope — instead of
+  the generic "does not look like a Naijamail key".
+- `memoryview` attachment content is accepted as raw bytes.
+
+### Fixed
+
+- A blank or whitespace-only `NAIJAMAIL_BASE_URL` counts as unset instead of
+  failing construction.
+- A send response whose `id` is present but not a string raises `ServerError`.
+- A lone surrogate in a text field is a `ValidationError`, not a raw
+  `UnicodeEncodeError`.
+- A NaN or infinite `timeout` is refused.
+- The webhooks module docstring no longer says the server does not emit them.
+
 ## [0.2.0] - 2026-10-04
 
 The first version published to PyPI (`pip install naijacloud-email`). 0.1.0
@@ -85,5 +136,6 @@ First release. Implements SDK-CONTRACT.md in full.
 - Attachments take bytes; file paths are never opened on the caller's behalf.
 - Constant-time webhook signature comparison, with a replay window.
 
-[Unreleased]: https://github.com/naijacloud/nc-email-python/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/naijacloud/nc-email-python/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/naijacloud/nc-email-python/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/naijacloud/nc-email-python/releases/tag/v0.2.0
