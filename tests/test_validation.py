@@ -102,6 +102,16 @@ class ForbiddenHeaderTest(ValidationTestCase):
                 )
                 self.assertIn("cannot be overridden", str(error))
 
+    def test_a_padded_forbidden_name_is_still_refused(self) -> None:
+        # The MIME composer trims header names, so " From" or "Bcc\t" would
+        # otherwise land as the real header.
+        for name in [" From", "bcc\t", " DKIM-Signature ", "Received "]:
+            with self.subTest(name=name):
+                error = self.assertRejectedLocally(
+                    from_="a@acme.com", to="x@y.com", headers={name: "spoofed"}
+                )
+                self.assertIn("cannot be overridden", str(error))
+
     def test_an_ordinary_header_is_allowed(self) -> None:
         self.api.enqueue_accepted()
         self.client.emails.send(
@@ -147,9 +157,50 @@ class LimitsTest(ValidationTestCase):
         error = self.assertRejectedLocally(
             from_="a@acme.com",
             to="x@y.com",
-            attachments=[{"filename": "big.bin", "content": b"\x00" * (8 * 1024 * 1024)}],
+            attachments=[{"filename": "big.bin", "content": b"\x00" * (10 * 1024 * 1024 + 1)}],
         )
         self.assertIn("byte limit", str(error))
+
+    def test_size_is_measured_on_decoded_bytes_like_the_server(self) -> None:
+        # 9 MiB of attachment is ~12 MiB of base64. The server measures the
+        # decoded bytes, so this must go out; it used to be refused locally.
+        self.api.enqueue_accepted()
+        self.client.emails.send(
+            from_="a@acme.com",
+            to="x@y.com",
+            text="hi",
+            attachments=[{"filename": "big.bin", "content": b"\x00" * (9 * 1024 * 1024)}],
+        )
+        self.assertEqual(len(self.api.requests), 1)
+
+    def test_exactly_ten_mib_is_allowed_and_html_text_count_as_utf8(self) -> None:
+        limit = 10 * 1024 * 1024
+        # "é" is two bytes of UTF-8: html + text + attachment = limit exactly.
+        html = "é" * 10
+        attachment = b"\x00" * (limit - 20 - 1)
+        self.api.enqueue_accepted()
+        self.client.emails.send(
+            from_="a@acme.com", to="x@y.com", html=html, text="a",
+            attachments=[{"filename": "a.bin", "content": attachment}],
+        )
+        self.assertEqual(len(self.api.requests), 1)
+        self.api.requests.clear()
+        self.assertRejectedLocally(
+            from_="a@acme.com", to="x@y.com", html=html, text="ab",
+            attachments=[{"filename": "a.bin", "content": attachment}],
+        )
+
+    def test_a_base64_string_attachment_counts_its_decoded_size(self) -> None:
+        import base64
+
+        encoded = base64.b64encode(b"\x00" * (10 * 1024 * 1024 + 1)).decode()
+        self.assertRejectedLocally(
+            from_="a@acme.com", to="x@y.com",
+            attachments=[{"filename": "a.bin", "content": encoded}],
+        )
+
+    def test_a_lone_surrogate_is_a_validation_error(self) -> None:
+        self.assertRejectedLocally(from_="a@acme.com", to="x@y.com", text="half \ud83d emoji")
 
 
 class AttachmentValidationTest(ValidationTestCase):
@@ -170,9 +221,28 @@ class AttachmentValidationTest(ValidationTestCase):
         self.assertIn("base64", str(error))
 
     def test_empty_content_is_rejected(self) -> None:
-        self.assertRejectedLocally(
-            from_="a@acme.com", to="x@y.com", attachments=[{"filename": "a.txt", "content": b""}]
+        for empty in (b"", bytearray(), memoryview(b""), "", "  "):
+            with self.subTest(content=empty):
+                self.assertRejectedLocally(
+                    from_="a@acme.com", to="x@y.com",
+                    attachments=[{"filename": "a.txt", "content": empty}],
+                )
+
+    def test_a_memoryview_is_raw_bytes(self) -> None:
+        self.api.enqueue_accepted()
+        self.client.emails.send(
+            from_="a@acme.com", to="x@y.com", text="hi",
+            attachments=[{"filename": "a.txt", "content": memoryview(b"hello")}],
         )
+        self.assertEqual(self.api.requests[-1].json["attachments"][0]["content"], "aGVsbG8=")
+
+    def test_content_type_and_content_id_reject_line_breaks(self) -> None:
+        for field in ("content_type", "content_id"):
+            with self.subTest(field=field):
+                self.assertRejectedLocally(
+                    from_="a@acme.com", to="x@y.com",
+                    attachments=[{"filename": "a", "content": b"x", field: "a\r\nBcc: v@x.com"}],
+                )
 
     def test_missing_filename_is_rejected(self) -> None:
         self.assertRejectedLocally(

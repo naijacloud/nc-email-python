@@ -155,6 +155,44 @@ class RetryAfterTest(RetryTestCase):
         self.assertEqual(caught.exception.retry_after, 60.0)
 
 
+class RetryAfterOnAnyRetryableTest(RetryTestCase):
+    def test_retry_after_on_a_503_is_honoured(self) -> None:
+        self.api.enqueue_error(503, "draining", headers={"Retry-After": "1"})
+        self.api.enqueue_accepted()
+        started = time.monotonic()
+        self.client().emails.send(**MINIMAL)
+        self.assertGreaterEqual(time.monotonic() - started, 0.9)
+        self.assertEqual(len(self.api.requests), 2)
+
+    def test_retry_after_on_a_503_is_exposed_and_clamped(self) -> None:
+        self.api.enqueue_error(503, "draining", headers={"Retry-After": "86400"})
+        with self.assertRaises(ServerError) as caught:
+            self.client(max_retries=0).emails.send(**MINIMAL)
+        self.assertEqual(caught.exception.retry_after, 60.0)
+
+
+class MalformedSuccessTest(RetryTestCase):
+    def test_a_non_json_2xx_is_not_retried(self) -> None:
+        self.api.enqueue_raw(202, b"<html>ok</html>", {"Content-Type": "text/html"})
+        self.api.enqueue_accepted()
+        with self.assertRaises(ServerError) as caught:
+            self.client().emails.send(**MINIMAL)
+        self.assertEqual(len(self.api.requests), 1)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.raw_body, "<html>ok</html>")
+
+    def test_a_send_response_without_a_string_id_raises_and_is_not_retried(self) -> None:
+        for payload in ({"status": "queued"}, {"id": 42, "status": "queued"}, {"id": ""}):
+            with self.subTest(payload=payload):
+                self.api.enqueue_json(202, payload)
+                self.api.enqueue_accepted()
+                start = len(self.api.requests)
+                with self.assertRaises(ServerError):
+                    self.client().emails.send(**MINIMAL)
+                self.assertEqual(len(self.api.requests) - start, 1)
+                self.api.take()  # drop the unused canned success
+
+
 class IdempotencyTest(RetryTestCase):
     def test_one_generated_key_across_every_attempt(self) -> None:
         for _ in range(2):
@@ -175,13 +213,40 @@ class IdempotencyTest(RetryTestCase):
         first, second = (request.headers["idempotency-key"] for request in self.api.requests)
         self.assertNotEqual(first, second)
 
-    def test_the_generated_key_is_also_in_the_body(self) -> None:
-        # Belt and braces against an intermediary that strips unknown headers:
-        # both carry the same value, so which one the server prefers is moot.
+    def test_the_key_travels_in_the_header_only(self) -> None:
+        # SDK-CONTRACT.md section 2: header only, never a second copy in the body.
         self.api.enqueue_accepted()
         self.client().emails.send(**MINIMAL)
         request = self.api.requests[-1]
-        self.assertEqual(request.json["idempotency_key"], request.headers["idempotency-key"])
+        self.assertTrue(request.headers["idempotency-key"])
+        self.assertNotIn("idempotency_key", request.json)
+
+    def test_an_empty_key_is_treated_as_none_and_one_is_generated(self) -> None:
+        for supplied in ("", "   "):
+            with self.subTest(supplied=supplied):
+                self.api.enqueue_error(500, "boom")
+                self.api.enqueue_accepted()
+                start = len(self.api.requests)
+                self.client().emails.send(idempotency_key=supplied, **MINIMAL)
+                keys = {r.headers["idempotency-key"] for r in self.api.requests[start:]}
+                self.assertEqual(len(keys), 1)
+                self.assertEqual(len(keys.pop()), 36)  # a generated UUIDv4
+
+    def test_a_non_ascii_key_goes_out_as_utf8_bytes(self) -> None:
+        self.api.enqueue_accepted()
+        self.client().emails.send(idempotency_key="commande-é-42", **MINIMAL)
+        # http.server decodes header bytes as Latin-1; undo that to see the wire.
+        wire = self.api.requests[-1].headers["idempotency-key"].encode("latin-1")
+        self.assertEqual(wire, "commande-é-42".encode())
+
+    def test_key_length_is_counted_in_utf8_bytes(self) -> None:
+        # 128 two-byte characters: 128 characters, 256 bytes — one over.
+        with self.assertRaises(ValidationError):
+            self.client().emails.send(idempotency_key="é" * 128, **MINIMAL)
+        self.assertEqual(self.api.requests, [])
+        self.api.enqueue_accepted()
+        self.client().emails.send(idempotency_key="é" * 127 + "a", **MINIMAL)
+        self.assertEqual(len(self.api.requests), 1)
 
     def test_a_caller_supplied_key_wins_and_is_never_regenerated(self) -> None:
         self.api.enqueue_error(500, "boom")
@@ -189,7 +254,7 @@ class IdempotencyTest(RetryTestCase):
         self.client().emails.send(idempotency_key="order-1024", **MINIMAL)
         for request in self.api.requests:
             self.assertEqual(request.headers["idempotency-key"], "order-1024")
-            self.assertEqual(request.json["idempotency_key"], "order-1024")
+            self.assertNotIn("idempotency_key", request.json)
 
 
 if __name__ == "__main__":

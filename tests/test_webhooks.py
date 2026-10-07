@@ -132,6 +132,50 @@ class VerifyTest(unittest.TestCase):
         with self.assertRaises(WebhookVerificationError):
             Webhooks.verify(body, sign(body), SECRET)
 
+    def test_a_verified_payload_that_is_not_an_object(self) -> None:
+        for body in (b"[1,2]", b'"text"', b"42", b"null"):
+            with self.subTest(body=body):
+                with self.assertRaises(WebhookVerificationError):
+                    Webhooks.verify(body, sign(body), SECRET)
+
+    def test_an_upper_case_signature_is_accepted(self) -> None:
+        header = sign(BODY)
+        timestamp, signature = header.split(",")
+        self.assertEqual(
+            Webhooks.verify(BODY, timestamp + "," + signature.upper().replace("V1=", "v1="),
+                            SECRET).type,
+            "email.delivered",
+        )
+
+    def test_a_timestamp_must_be_plain_ascii_digits(self) -> None:
+        now = int(time.time())
+        digest = sign(BODY).split(",")[1]
+        for t in ("+{}".format(now), " {}x".format(now),
+                  "{}".format(now).replace("1", "\u0661"), "-{}".format(now), "1e9",
+                  "{}.0".format(now), ""):
+            with self.subTest(t=t):
+                with self.assertRaises(WebhookVerificationError):
+                    Webhooks.verify(BODY, "t={},{}".format(t, digest), SECRET)
+
+    def test_an_underscored_timestamp_is_refused_even_when_signed(self) -> None:
+        # int("1_756_468_800") == 1756468800; the signed string would differ from
+        # what int() normalised to, but the parser must refuse it outright.
+        now = str(int(time.time()))
+        underscored = now[:4] + "_" + now[4:]
+        with self.assertRaises(WebhookVerificationError):
+            Webhooks.verify(BODY, "t={},v1={}".format(underscored, "0" * 64), SECRET)
+
+    def test_a_huge_timestamp_is_refused_cleanly(self) -> None:
+        for t in ("9" * 13, "9" * 400):
+            with self.subTest(length=len(t)):
+                with self.assertRaises(WebhookVerificationError):
+                    Webhooks.verify(BODY, "t={},v1={}".format(t, "0" * 64), SECRET)
+
+    def test_twelve_digits_parse_but_are_outside_tolerance(self) -> None:
+        with self.assertRaises(WebhookVerificationError) as caught:
+            Webhooks.verify(BODY, "t={},v1={}".format("9" * 12, "0" * 64), SECRET)
+        self.assertIn("tolerance", str(caught.exception))
+
     def test_unknown_event_fields_are_ignored(self) -> None:
         body = json.dumps({"type": "email.opened", "id": "e", "surprise": 1}).encode()
         event = Webhooks.verify(body, sign(body), SECRET)
@@ -157,6 +201,16 @@ class ToleranceTest(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 Webhooks.verify(BODY, stale, SECRET, tolerance=bad)
 
-    def test_a_zero_tolerance_is_still_allowed(self) -> None:
+    def test_a_zero_tolerance_is_strict_not_the_default(self) -> None:
         with self.assertRaises(WebhookVerificationError):
             Webhooks.verify(BODY, sign(BODY, timestamp=int(time.time()) - 5), SECRET, tolerance=0)
+        # A signature from this very second still passes (retry once if the
+        # clock ticked between signing and verifying).
+        for _ in range(2):
+            try:
+                Webhooks.verify(BODY, sign(BODY), SECRET, tolerance=0)
+                break
+            except WebhookVerificationError:
+                continue
+        else:
+            self.fail("a current signature was refused with tolerance=0")

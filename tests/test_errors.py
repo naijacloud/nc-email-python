@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 
-from _support import TEST_KEY, MockAPI, reserve_closed_port
+from _support import TEST_KEY, CannedResponse, MockAPI, reserve_closed_port
 
 from nc_email import (
     AuthenticationError,
@@ -65,11 +66,37 @@ class ErrorMappingTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.client.emails.send(**MINIMAL)
 
-    def test_an_unmapped_4xx_falls_back_to_the_base_class(self) -> None:
-        self.api.enqueue_error(451, "blocked for legal reasons")
-        with self.assertRaises(NaijamailError) as caught:
+    def test_an_unlisted_4xx_is_a_validation_error(self) -> None:
+        # SDK-CONTRACT.md section 3: the same answer in all five SDKs.
+        for status in (405, 415, 451):
+            with self.subTest(status=status):
+                self.api.enqueue_error(status, "nope")
+                start = len(self.api.requests)
+                with self.assertRaises(ValidationError) as caught:
+                    self.client.emails.send(**MINIMAL)
+                self.assertEqual(caught.exception.status_code, status)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(len(self.api.requests) - start, 1)
+
+    def test_raw_and_parsed_bodies_are_both_exposed(self) -> None:
+        self.api.enqueue_error(403, "verify the domain first", error="Forbidden")
+        with self.assertRaises(NaijamailPermissionError) as caught:
             self.client.emails.send(**MINIMAL)
-        self.assertIs(type(caught.exception), NaijamailError)
+        self.assertEqual(caught.exception.parsed_body["statusCode"], 403)
+        self.assertIn('"verify the domain first"', caught.exception.raw_body)
+
+    def test_a_non_json_error_has_raw_body_and_no_parsed_body(self) -> None:
+        self.api.enqueue_raw(400, b"<html>bad</html>", {"Content-Type": "text/html"})
+        with self.assertRaises(ValidationError) as caught:
+            self.client.emails.send(**MINIMAL)
+        self.assertIsNone(caught.exception.parsed_body)
+        self.assertEqual(caught.exception.raw_body, "<html>bad</html>")
+
+    def test_a_local_error_has_an_empty_raw_body(self) -> None:
+        with self.assertRaises(ValidationError) as caught:
+            self.client.emails.send(to="x@y.com")
+        self.assertEqual(caught.exception.raw_body, "")
+        self.assertIsNone(caught.exception.parsed_body)
 
     def test_message_arrays_are_joined(self) -> None:
         self.api.enqueue_error(400, ['"to" is required', '"from" is required'])
@@ -157,6 +184,32 @@ class TimeoutTest(unittest.TestCase):
         client = Naijamail(TEST_KEY, base_url=api.base_url, max_retries=0, timeout=0.2)
         with self.assertRaises(NaijamailTimeoutError):
             client.emails.send(**MINIMAL)
+
+    def test_the_deadline_covers_the_whole_response_not_each_read(self) -> None:
+        # One byte every 0.1s never trips a 0.5s per-read timeout, but the body
+        # takes ~3s in total. The attempt must end near the 0.5s deadline.
+        api = MockAPI().start()
+        self.addCleanup(api.stop)
+        api.enqueue(
+            CannedResponse(
+                202, b'{"id":"1","status":"queued"}' + b" " * 2,
+                {"Content-Type": "application/json"}, trickle=0.1,
+            )
+        )
+        client = Naijamail(TEST_KEY, base_url=api.base_url, max_retries=0, timeout=0.5)
+        started = time.monotonic()
+        with self.assertRaises(NaijamailTimeoutError):
+            client.emails.send(**MINIMAL)
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_each_retry_gets_a_fresh_deadline(self) -> None:
+        api = MockAPI().start()
+        self.addCleanup(api.stop)
+        api.enqueue_accepted(delay=0.6)
+        api.enqueue_accepted(delay=0.1)
+        client = Naijamail(TEST_KEY, base_url=api.base_url, max_retries=1, timeout=0.4)
+        self.assertEqual(client.emails.send(**MINIMAL).id, "5b1e0000-0000-4000-8000-000000000001")
+        self.assertEqual(len(api.requests), 2)
 
 
 if __name__ == "__main__":
