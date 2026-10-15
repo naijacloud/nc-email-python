@@ -1,8 +1,8 @@
 """The `emails` resource: send one message, retrieve one message.
 
-Two methods, because the API has two endpoints. There is no domains, api-keys,
-batch or contacts resource here — the control plane does not serve them, and an
-SDK method that 404s is worse than no method at all.
+Two methods. The API has more routes (batch send, list, limits, domains and
+suppressions; see https://naijacloud.com/docs/api/email). They are REST-only for
+now; this SDK wraps the two every integration needs.
 
 Most of this file is validation that runs before anything touches a socket. That
 is not defensive padding: a CRLF in a subject is a header-injection attempt, and

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-15
+
+### Fixed
+
+- `emails.send()` returns the `sandbox` flag the API sends
+  (`SendEmailResponse.sandbox`), so a test-key send is recognisable without a
+  second `get()` (TGL-1155).
+- The README and docstrings say what the API enforces: `subject` is required and
+  at least one of `html`/`text` must be given. They no longer claim the API has
+  two endpoints or that Naija Cloud sends no webhooks (TGL-1156).
+
 ## [0.3.0] - 2026-10-07
 
 Conformance with the other four Naijamail SDKs (TGL-741). Several of these
@@ -136,6 +147,7 @@ First release. Implements SDK-CONTRACT.md in full.
 - Attachments take bytes; file paths are never opened on the caller's behalf.
 - Constant-time webhook signature comparison, with a replay window.
 
-[Unreleased]: https://github.com/naijacloud/nc-email-python/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/naijacloud/nc-email-python/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/naijacloud/nc-email-python/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/naijacloud/nc-email-python/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/naijacloud/nc-email-python/releases/tag/v0.2.0

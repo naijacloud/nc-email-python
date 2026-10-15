@@ -77,11 +77,10 @@ a message list, limits, domains and suppressions
 
 | | |
 | --- | --- |
-| `nm.emails.send(...)` | `POST /v1/emails` — returns `SendEmailResponse(id, status, rejected)` |
+| `nm.emails.send(...)` | `POST /v1/emails` — returns `SendEmailResponse(id, status, rejected, sandbox)` |
 | `nm.emails.get(id)` | `GET /v1/emails/{id}` — returns `Email` |
 
-There is no domains, api-keys, batch or contacts resource here. Those do not
-exist server-side, and a method that 404s is worse than no method.
+Call the other routes over plain HTTPS with the same key until they are wrapped.
 
 ### Sending
 
@@ -90,8 +89,8 @@ exist server-side, and a method that 404s is worse than no method.
 | `from_` (or `from`) | `str` | yes | `"Name <a@b.com>"` or `"a@b.com"`. The domain must be verified for your team. |
 | `to` | `str` \| `list[str]` | yes | At least one address. |
 | `cc`, `bcc`, `reply_to` | `str` \| `list[str]` | no | `replyTo` is accepted as well; the SDK always sends `reply_to`. |
-| `subject` | `str` | no | Defaults to `""`, and is always sent. |
-| `html`, `text` | `str` | no | |
+| `subject` | `str` | yes | The API refuses a missing or blank subject with a 400 `subject is required`. |
+| `html`, `text` | `str` | one of them | At least one is required (400 `provide html, text, or both`); send both for the best inbox placement. |
 | `headers` | `dict[str, str]` | no | At most 25. `From`, `To`, `Cc`, `Bcc`, `Subject`, `DKIM-Signature` and `Received` are refused, case-insensitively and with surrounding whitespace ignored (`" From"` is refused too). |
 | `attachments` | `list[dict]` | no | `{filename, content, content_type?, content_id?}` |
 | `tags` | `dict[str, str]` | no | At most 10; keys up to 64 chars, values up to 256. |
@@ -256,7 +255,8 @@ The rules the SDK enforces, and why:
 
 A **test** key (`nmail_test_…`) is sandboxed: sends are recorded and answered
 with a real id, never delivered, so staging and CI can exercise the whole flow
-without mailing anyone. `Email.sandbox` is true for those messages.
+without mailing anyone. `SendEmailResponse.sandbox` and `Email.sandbox` are true
+for those messages.
 
 ### Which key
 
