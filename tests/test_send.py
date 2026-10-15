@@ -35,6 +35,7 @@ class SendTest(SendTestCase):
         self.assertEqual(sent.id, "msg-1")
         self.assertEqual(sent.status, "queued")
         self.assertEqual(sent.rejected, [])
+        self.assertFalse(sent.sandbox)
 
         request = self.last
         self.assertEqual(request.method, "POST")
@@ -141,6 +142,15 @@ class RejectedTest(SendTestCase):
         self.api.enqueue_accepted(rejected=[{"address": "x@y.com", "reason": "suppressed"}])
         sent = self.client.emails.send(from_="a@acme.com", to="x@y.com")
         self.assertEqual(sent.status, "queued")
+
+
+class SandboxTest(SendTestCase):
+    def test_sandbox_flag_is_passed_through(self) -> None:
+        # A test-key send answers with "sandbox": true; the caller should not
+        # need a second get() to learn nothing will be delivered.
+        self.api.enqueue_accepted(extra={"sandbox": True})
+        sent = self.client.emails.send(from_="a@acme.com", to="x@y.com")
+        self.assertTrue(sent.sandbox)
 
 
 class UnknownFieldsTest(SendTestCase):

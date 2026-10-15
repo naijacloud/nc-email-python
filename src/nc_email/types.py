@@ -159,6 +159,10 @@ class SendEmailResponse:
     #: normalised to an empty list so callers never write `if resp.rejected is
     #: not None and resp.rejected`.
     rejected: List[RejectedRecipient] = field(default_factory=list)
+    #: True when the send used a test key (`nmail_test_…`): accepted and
+    #: recorded, never handed to a mail server. The same flag `Email.sandbox`
+    #: carries, so a test send is recognisable without a second request.
+    sandbox: bool = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SendEmailResponse:
@@ -168,7 +172,12 @@ class SendEmailResponse:
             for item in (raw if isinstance(raw, list) else [])
             if isinstance(item, Mapping)
         ]
-        return cls(id=_str(data, "id"), status=_str(data, "status"), rejected=rejected)
+        return cls(
+            id=_str(data, "id"),
+            status=_str(data, "status"),
+            rejected=rejected,
+            sandbox=_bool(data, "sandbox"),
+        )
 
 
 @dataclass(frozen=True)
@@ -221,10 +230,11 @@ class Email:
 class WebhookEvent:
     """A verified webhook payload.
 
-    `data` and `raw` are kept deliberately loose. The event schema is fixed in
-    SDK-CONTRACT.md section 6 but the control plane does not emit these yet, so
-    pinning field names here would be inventing an API that could not be
-    corrected without a breaking change. `raw` is always the whole decoded body.
+    Naija Cloud delivers these, signed, to the endpoints you register. `data`
+    and `raw` are kept deliberately loose: the signature scheme (SDK-CONTRACT.md
+    section 6) is fixed, while event payloads can gain fields, and pinning field
+    names here could not be corrected without a breaking change. `raw` is always
+    the whole decoded body.
     """
 
     type: str
