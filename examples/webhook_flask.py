@@ -1,10 +1,7 @@
 """Verify a signed webhook inside a Flask handler.
 
-The control plane does not emit customer-facing webhooks yet — it currently only
-ingests provider callbacks from Mailgun and SES. This example is here because the
-signing scheme is fixed in the SDK contract, so both halves ship against one
-definition. Do not point a production endpoint at this until the platform sends
-its first event.
+Naija Cloud delivers events to the endpoints you register, each signed with the
+NC-Signature header this handler verifies.
 
     pip install flask          # not a dependency of this SDK
     export NAIJAMAIL_WEBHOOK_SECRET=nmail_whsec_...

@@ -433,9 +433,10 @@ class Emails:
                 )
             )
 
-        # Always sent, even empty: the server defaults it to "" anyway, and a
-        # body whose shape does not depend on the caller's arguments is one
-        # fewer thing to reproduce when a message goes out wrong.
+        # Always sent, even empty: a body whose shape does not depend on the
+        # caller's arguments is one fewer thing to reproduce when a message goes
+        # out wrong. The API requires a non-blank subject (400 "subject is
+        # required").
         subject = _reject_control_chars(
             _require_str(params.get("subject", ""), '"subject"'), '"subject"'
         )
